@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from xhamster_api import Client
 import requests
 import re
 import subprocess
@@ -21,9 +20,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Initialize xHamster client
-client = Client()
 
 def sanitize_filename(name: str) -> str:
     """Sanitize video title for safe filenames"""
