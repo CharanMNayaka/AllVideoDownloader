@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from xhamster_api import Client
 import requests
 import re
@@ -9,6 +8,7 @@ import subprocess
 import tempfile
 import os
 import shutil
+import yt_dlp
 
 # Initialize FastAPI
 app = FastAPI(title="xHamster Downloader API 🚀")
@@ -32,87 +32,20 @@ def sanitize_filename(name: str) -> str:
     safe_name = safe_name.strip()[:100]
     return safe_name + ".mp4"
 
-def get_ffmpeg_command():
-    """Get the ffmpeg command to use"""
-    # Try PATH first
+def check_ytdlp():
+    """Check if yt-dlp is available"""
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        return 'ffmpeg'
-    except:
-        pass
-    
-    # Try current directory
-    local_ffmpeg = os.path.join(os.getcwd(), 'ffmpeg.exe')
-    if os.path.exists(local_ffmpeg):
-        return local_ffmpeg
-    
-    # Try common paths
-    common_paths = [
-        r'D:\ffmpeg-2025-12-31-git-38e89fe502-full_build\bin\ffmpeg.exe',
-        r'C:\ffmpeg\bin\ffmpeg.exe',
-    ]
-    for path in common_paths:
-        if os.path.exists(path):
-            return path
-    
-    return 'ffmpeg'  # Fallback
-
-def check_ffmpeg():
-    """Check if ffmpeg is installed"""
-    # Check in PATH
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        import yt_dlp
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    
-    # Check in current directory
-    local_ffmpeg = os.path.join(os.getcwd(), 'ffmpeg.exe')
-    if os.path.exists(local_ffmpeg):
-        try:
-            subprocess.run([local_ffmpeg, '-version'], capture_output=True, check=True)
-            return True
-        except:
-            pass
-    
-    # Check in common installation paths
-    common_paths = [
-        r'D:\ffmpeg-2025-12-31-git-38e89fe502-full_build\bin\ffmpeg.exe',
-        r'C:\ffmpeg\bin\ffmpeg.exe',
-    ]
-    for path in common_paths:
-        if os.path.exists(path):
-            try:
-                subprocess.run([path, '-version'], capture_output=True, check=True)
-                return True
-            except:
-                pass
-    
-    return False
-
-def get_best_quality_m3u8(base_url: str) -> str:
-    """Get the best quality M3U8 URL from base URL"""
-    # The base URL template has _TPL_ which needs to be replaced
-    # Try different qualities in order
-    qualities = ['2160p', '1080p', '720p', '480p', '240p', '144p']
-    
-    for quality in qualities:
-        m3u8_url = base_url.replace('_TPL_', quality)
-        try:
-            response = requests.head(m3u8_url, timeout=5, allow_redirects=True)
-            if response.status_code == 200:
-                print(f"[DEBUG] Found working quality: {quality}")
-                return m3u8_url
-        except:
-            continue
-    
-    # If none work, try 720p as default
-    return base_url.replace('_TPL_', '720p')
+    except ImportError:
+        return False
 
 @app.get("/", response_class=HTMLResponse)
 def root():
     # Serve the web interface as default page
-    html_content = """
+    ytdlp_status = "✅ Installed" if check_ytdlp() else "❌ Not installed"
+    
+    html_content = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -120,8 +53,8 @@ def root():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Video Downloader</title>
         <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 min-height: 100vh;
@@ -129,30 +62,40 @@ def root():
                 align-items: center;
                 justify-content: center;
                 padding: 20px;
-            }
-            .container {
+            }}
+            .container {{
                 background: white;
                 border-radius: 20px;
                 padding: 40px;
                 max-width: 600px;
                 width: 100%;
                 box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            }
-            h1 { color: #333; margin-bottom: 10px; font-size: 28px; }
-            .subtitle { color: #666; margin-bottom: 30px; font-size: 14px; }
-            .input-group { margin-bottom: 20px; }
-            label { display: block; margin-bottom: 8px; color: #555; font-weight: 500; }
-            input {
+            }}
+            h1 {{ color: #333; margin-bottom: 10px; font-size: 28px; }}
+            .subtitle {{ color: #666; margin-bottom: 30px; font-size: 14px; }}
+            .status-badge {{
+                display: inline-block;
+                padding: 5px 10px;
+                border-radius: 5px;
+                font-size: 12px;
+                font-weight: 600;
+                margin-bottom: 20px;
+            }}
+            .badge-success {{ background: #d4edda; color: #155724; }}
+            .badge-error {{ background: #f8d7da; color: #721c24; }}
+            .input-group {{ margin-bottom: 20px; }}
+            label {{ display: block; margin-bottom: 8px; color: #555; font-weight: 500; }}
+            input {{
                 width: 100%;
                 padding: 15px;
                 border: 2px solid #e0e0e0;
                 border-radius: 10px;
                 font-size: 16px;
                 transition: border 0.3s;
-            }
-            input:focus { outline: none; border-color: #667eea; }
-            .button-group { display: flex; gap: 10px; margin-bottom: 20px; }
-            button {
+            }}
+            input:focus {{ outline: none; border-color: #667eea; }}
+            .button-group {{ display: flex; gap: 10px; margin-bottom: 20px; }}
+            button {{
                 flex: 1;
                 padding: 15px;
                 border: none;
@@ -161,40 +104,40 @@ def root():
                 font-weight: 600;
                 cursor: pointer;
                 transition: transform 0.2s, opacity 0.2s;
-            }
-            button:active { transform: scale(0.98); }
-            button:disabled { opacity: 0.5; cursor: not-allowed; }
-            .btn-primary {
+            }}
+            button:active {{ transform: scale(0.98); }}
+            button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+            .btn-primary {{
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
-            }
-            .btn-secondary { background: #f0f0f0; color: #333; }
-            .info-box {
+            }}
+            .btn-secondary {{ background: #f0f0f0; color: #333; }}
+            .info-box {{
                 background: #f8f9fa;
                 padding: 20px;
                 border-radius: 10px;
                 margin-top: 20px;
                 display: none;
-            }
-            .info-box.show { display: block; }
-            .info-item {
+            }}
+            .info-box.show {{ display: block; }}
+            .info-item {{
                 margin-bottom: 10px;
                 display: flex;
                 justify-content: space-between;
-            }
-            .info-label { color: #666; font-weight: 500; }
-            .info-value { color: #333; font-weight: 600; }
-            .status {
+            }}
+            .info-label {{ color: #666; font-weight: 500; }}
+            .info-value {{ color: #333; font-weight: 600; }}
+            .status {{
                 padding: 10px;
                 border-radius: 8px;
                 margin-top: 15px;
                 text-align: center;
                 font-weight: 500;
-            }
-            .status.loading { background: #fff3cd; color: #856404; }
-            .status.success { background: #d4edda; color: #155724; }
-            .status.error { background: #f8d7da; color: #721c24; }
-            .spinner {
+            }}
+            .status.loading {{ background: #fff3cd; color: #856404; }}
+            .status.success {{ background: #d4edda; color: #155724; }}
+            .status.error {{ background: #f8d7da; color: #721c24; }}
+            .spinner {{
                 border: 3px solid #f3f3f3;
                 border-top: 3px solid #667eea;
                 border-radius: 50%;
@@ -203,22 +146,25 @@ def root():
                 animation: spin 1s linear infinite;
                 display: inline-block;
                 margin-right: 10px;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            @media (max-width: 480px) {
-                .container { padding: 20px; }
-                h1 { font-size: 24px; }
-                .button-group { flex-direction: column; }
-            }
+            }}
+            @keyframes spin {{
+                0% {{ transform: rotate(0deg); }}
+                100% {{ transform: rotate(360deg); }}
+            }}
+            @media (max-width: 480px) {{
+                .container {{ padding: 20px; }}
+                h1 {{ font-size: 24px; }}
+                .button-group {{ flex-direction: column; }}
+            }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🎬 Video Downloader</h1>
             <p class="subtitle">Download videos easily to your device</p>
+            <div class="status-badge {'badge-success' if ytdlp_status == '✅ Installed' else 'badge-error'}">
+                yt-dlp: {ytdlp_status}
+            </div>
             
             <div class="input-group">
                 <label for="videoUrl">Video URL</label>
@@ -237,65 +183,61 @@ def root():
         <script>
             const API_URL = window.location.origin;
             
-            function showStatus(message, type) {
+            function showStatus(message, type) {{
                 const statusDiv = document.getElementById('status');
-                statusDiv.className = `status ${type}`;
+                statusDiv.className = `status ${{type}}`;
                 statusDiv.innerHTML = message;
-            }
+            }}
             
-            async function getInfo() {
+            async function getInfo() {{
                 const url = document.getElementById('videoUrl').value.trim();
-                if (!url) { showStatus('Please enter a video URL', 'error'); return; }
+                if (!url) {{ showStatus('Please enter a video URL', 'error'); return; }}
                 
                 showStatus('<div class="spinner"></div> Fetching video info...', 'loading');
                 
-                try {
-                    const response = await fetch(`${API_URL}/info?url=${encodeURIComponent(url)}`);
+                try {{
+                    const response = await fetch(`${{API_URL}}/info?url=${{encodeURIComponent(url)}}`);
                     const data = await response.json();
                     
-                    if (response.ok) {
+                    if (response.ok) {{
                         const infoBox = document.getElementById('infoBox');
                         infoBox.className = 'info-box show';
                         infoBox.innerHTML = `
                             <div class="info-item">
                                 <span class="info-label">Title:</span>
-                                <span class="info-value">${data.title}</span>
+                                <span class="info-value">${{data.title}}</span>
                             </div>
                             <div class="info-item">
-                                <span class="info-label">Format:</span>
-                                <span class="info-value">${data.format || 'M3U8/HLS'}</span>
-                            </div>
-                            <div class="info-item">
-                                <span class="info-label">Stars:</span>
-                                <span class="info-value">${data.pornstars || 'Unknown'}</span>
+                                <span class="info-label">Method:</span>
+                                <span class="info-value">${{data.method || 'yt-dlp'}}</span>
                             </div>
                         `;
                         showStatus('✅ Video info loaded successfully', 'success');
-                    } else {
-                        showStatus(`❌ Error: ${data.detail}`, 'error');
-                    }
-                } catch (error) {
-                    showStatus(`❌ Error: ${error.message}`, 'error');
-                }
-            }
+                    }} else {{
+                        showStatus(`❌ Error: ${{data.detail}}`, 'error');
+                    }}
+                }} catch (error) {{
+                    showStatus(`❌ Error: ${{error.message}}`, 'error');
+                }}
+            }}
             
-            function downloadVideo() {
+            function downloadVideo() {{
                 const url = document.getElementById('videoUrl').value.trim();
-                if (!url) { showStatus('Please enter a video URL', 'error'); return; }
+                if (!url) {{ showStatus('Please enter a video URL', 'error'); return; }}
                 
-                showStatus('<div class="spinner"></div> Starting download...', 'loading');
+                showStatus('<div class="spinner"></div> Starting download (may take 1-2 minutes)...', 'loading');
                 
-                const downloadUrl = `${API_URL}/download?url=${encodeURIComponent(url)}`;
+                const downloadUrl = `${{API_URL}}/download?url=${{encodeURIComponent(url)}}`;
                 window.open(downloadUrl, '_blank');
                 
-                setTimeout(() => {
-                    showStatus('✅ Download started! Check your downloads folder.', 'success');
-                }, 1000);
-            }
+                setTimeout(() => {{
+                    showStatus('✅ Download started! This may take 1-2 minutes for the video to process.', 'success');
+                }}, 1000);
+            }}
             
-            document.getElementById('videoUrl').addEventListener('keypress', function(e) {
+            document.getElementById('videoUrl').addEventListener('keypress', function(e) {{
                 if (e.key === 'Enter') downloadVideo();
-            });
+            }});
         </script>
     </body>
     </html>
@@ -304,180 +246,116 @@ def root():
 
 @app.get("/api")
 def api_info():
-    ffmpeg_status = "✅ Installed" if check_ffmpeg() else "❌ Not installed"
+    ytdlp_status = "✅ Installed" if check_ytdlp() else "❌ Not installed"
     return {
         "message": "xHamster Downloader API",
-        "ffmpeg_status": ffmpeg_status,
+        "ytdlp_status": ytdlp_status,
+        "method": "yt-dlp (bypasses anti-bot protection)",
         "endpoints": {
             "/": "Web interface",
-            "/api": "API information (this page)",
+            "/api": "API information",
             "/info": "Get video information",
-            "/debug": "Debug video sources",
-            "/m3u8-url": "Get M3U8 stream URL",
             "/download": "Download video"
         }
     }
 
 @app.get("/info")
 def get_video_info(url: str = Query(..., description="xHamster video URL")):
-    """Get video information"""
+    """Get video information using yt-dlp"""
     try:
-        video = client.get_video(url)
-        return {
-            "title": video.title,
-            "thumbnail": getattr(video, 'thumbnail', 'Unknown'),
-            "pornstars": getattr(video, 'pornstars', 'Unknown'),
-            "has_m3u8": hasattr(video, 'm3u8_base_url'),
-            "format": "M3U8/HLS" if hasattr(video, 'm3u8_base_url') else "Unknown"
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
         }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            return {
+                "title": info.get('title', 'Unknown'),
+                "duration": info.get('duration', 'Unknown'),
+                "uploader": info.get('uploader', 'Unknown'),
+                "method": "yt-dlp",
+                "formats_available": len(info.get('formats', []))
+            }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch video info: {str(e)}")
 
-@app.get("/debug")
-def debug_video(url: str = Query(..., description="xHamster video URL")):
-    """Debug endpoint to see video data"""
-    try:
-        video = client.get_video(url)
-        
-        debug_info = {
-            "title": video.title,
-            "has_m3u8_base_url": hasattr(video, 'm3u8_base_url'),
-            "has_download_method": hasattr(video, 'download'),
-        }
-        
-        if hasattr(video, 'm3u8_base_url'):
-            base_url = video.m3u8_base_url
-            debug_info['m3u8_base_url'] = base_url
-            debug_info['m3u8_note'] = "This is M3U8/HLS format. _TPL_ will be replaced with quality (720p, 1080p, etc.)"
-            
-            # Test which qualities are available
-            qualities = ['2160p', '1080p', '720p', '480p', '240p', '144p']
-            available = []
-            for quality in qualities:
-                test_url = base_url.replace('_TPL_', quality)
-                try:
-                    r = requests.head(test_url, timeout=3)
-                    if r.status_code == 200:
-                        available.append(quality)
-                except:
-                    pass
-            debug_info['available_qualities'] = available
-        
-        return debug_info
-        
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/m3u8-url")
-def get_m3u8_url(
-    url: str = Query(..., description="xHamster video URL"),
-    quality: str = Query("720p", description="Quality: 2160p, 1080p, 720p, 480p, 240p, 144p")
-):
-    """
-    Get the M3U8 stream URL.
-    You can use this URL with video players like VLC, mpv, or online players.
-    """
-    try:
-        video = client.get_video(url)
-        
-        if not hasattr(video, 'm3u8_base_url'):
-            raise HTTPException(status_code=404, detail="No M3U8 URL found for this video")
-        
-        base_url = video.m3u8_base_url
-        m3u8_url = base_url.replace('_TPL_', quality)
-        
-        # Verify URL works
-        try:
-            response = requests.head(m3u8_url, timeout=5)
-            if response.status_code != 200:
-                # Try to find a working quality
-                m3u8_url = get_best_quality_m3u8(base_url)
-        except:
-            m3u8_url = get_best_quality_m3u8(base_url)
-        
-        return {
-            "title": video.title,
-            "m3u8_url": m3u8_url,
-            "quality": quality,
-            "how_to_use": {
-                "vlc": f"vlc {m3u8_url}",
-                "mpv": f"mpv {m3u8_url}",
-                "ffmpeg_download": f'ffmpeg -i "{m3u8_url}" -c copy output.mp4',
-                "browser": "Paste URL in video player extensions"
-            },
-            "note": "M3U8 URLs may expire after some time"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
-
 @app.get("/download")
-def download_video(
-    url: str = Query(..., description="xHamster video URL"),
-    quality: str = Query("best", description="Quality: best, 1080p, 720p, 480p")
-):
+def download_video(url: str = Query(..., description="xHamster video URL")):
     """
-    Download video using xhamster-api library's built-in download method.
-    This handles token refresh and authentication automatically.
+    Download video using yt-dlp (bypasses anti-bot protection).
+    yt-dlp acts like a real browser and handles cookies/tokens automatically.
     """
     
+    if not check_ytdlp():
+        raise HTTPException(
+            status_code=500,
+            detail="yt-dlp is not installed. Please install: pip install yt-dlp"
+        )
+    
     try:
-        video = client.get_video(url)
-        
-        print(f"[DEBUG] Got video: {video.title}")
-        
         # Create temp directory
         temp_dir = tempfile.mkdtemp()
-        filename = sanitize_filename(video.title)
         
         print(f"[DEBUG] Downloading to: {temp_dir}")
         
-        # Use library's download method (handles tokens automatically)
+        # yt-dlp options
+        ydl_opts = {
+            'format': 'best',  # Best quality
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+            'nocheckcertificate': True,
+            # Add headers to mimic browser
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://xhamster.com/',
+            }
+        }
+        
+        # Download video
         try:
-            video.download(
-                downloader="threaded",
-                quality=quality,
-                path=temp_dir
-            )
-            print(f"[DEBUG] Download completed")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get('title', 'video')
+                ext = info.get('ext', 'mp4')
+                
+            print(f"[DEBUG] Download completed: {title}")
             
         except Exception as e:
             shutil.rmtree(temp_dir)
-            print(f"[ERROR] Library download failed: {e}")
+            print(f"[ERROR] yt-dlp download failed: {e}")
             raise HTTPException(
-                status_code=500, 
-                detail=f"Download failed. The video may be private, geo-blocked, or require authentication. Error: {str(e)}"
+                status_code=500,
+                detail=f"Download failed: {str(e)}. The video may be private or geo-blocked."
             )
         
-        # Find the downloaded file
+        # Find downloaded file
         downloaded_files = []
         for file in os.listdir(temp_dir):
-            if file.endswith(('.mp4', '.mkv', '.webm')):
+            if file.endswith(('.mp4', '.mkv', '.webm', '.flv')):
                 downloaded_files.append(file)
         
         if not downloaded_files:
             shutil.rmtree(temp_dir)
             raise HTTPException(
                 status_code=500,
-                detail="Download completed but no video file found. The video format may not be supported."
+                detail="Download completed but no video file found."
             )
         
         file_path = os.path.join(temp_dir, downloaded_files[0])
         file_size = os.path.getsize(file_path)
         
-        print(f"[DEBUG] Found file: {downloaded_files[0]} ({file_size / (1024*1024):.2f} MB)")
+        print(f"[DEBUG] File: {downloaded_files[0]} ({file_size / (1024*1024):.2f} MB)")
         
-        # Check if file is too small (likely failed)
-        if file_size < 1024 * 100:  # Less than 100KB
-            shutil.rmtree(temp_dir)
-            raise HTTPException(
-                status_code=500,
-                detail="Downloaded file is too small. Download may have failed."
-            )
+        # Get safe filename
+        filename = sanitize_filename(title if 'title' in locals() else downloaded_files[0])
         
-        # Stream file back to user
+        # Stream file to user
         def iterfile():
             try:
                 with open(file_path, 'rb') as f:
@@ -488,7 +366,6 @@ def download_video(
                             break
                         yield chunk
             finally:
-                # Cleanup temp directory
                 try:
                     shutil.rmtree(temp_dir)
                     print(f"[DEBUG] Cleaned up temp directory")
@@ -509,56 +386,6 @@ def download_video(
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
-
-@app.get("/download-simple")
-def download_simple(url: str = Query(..., description="xHamster video URL")):
-    """
-    Try to download using the library's built-in download method.
-    May or may not work depending on the video.
-    """
-    try:
-        video = client.get_video(url)
-        
-        # Create temp directory
-        temp_dir = tempfile.mkdtemp()
-        
-        try:
-            # Try using the library's download method
-            video.download(downloader="threaded", quality="best", path=temp_dir)
-            
-            # Find downloaded file
-            files = [f for f in os.listdir(temp_dir) if f.endswith('.mp4')]
-            
-            if not files:
-                shutil.rmtree(temp_dir)
-                raise HTTPException(status_code=500, detail="Download completed but no MP4 file found")
-            
-            file_path = os.path.join(temp_dir, files[0])
-            filename = sanitize_filename(video.title)
-            
-            # Stream file
-            def iterfile():
-                try:
-                    with open(file_path, 'rb') as f:
-                        while chunk := f.read(1024*1024):
-                            yield chunk
-                finally:
-                    shutil.rmtree(temp_dir)
-            
-            return StreamingResponse(
-                iterfile(),
-                media_type="application/octet-stream",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-            )
-            
-        except Exception as e:
-            shutil.rmtree(temp_dir)
-            raise HTTPException(status_code=500, detail=f"Library download failed: {str(e)}")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
