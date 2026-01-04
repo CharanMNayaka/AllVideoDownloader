@@ -416,86 +416,99 @@ def get_m3u8_url(
 @app.get("/download")
 def download_video(
     url: str = Query(..., description="xHamster video URL"),
-    quality: str = Query("720p", description="Quality: 2160p, 1080p, 720p, 480p, 240p, 144p")
+    quality: str = Query("best", description="Quality: best, 1080p, 720p, 480p")
 ):
     """
-    Download M3U8 video using ffmpeg.
-    Requires ffmpeg to be installed on the system.
+    Download video using xhamster-api library's built-in download method.
+    This handles token refresh and authentication automatically.
     """
-    
-    # Check if ffmpeg is available
-    if not check_ffmpeg():
-        raise HTTPException(
-            status_code=500,
-            detail="ffmpeg is not installed. Please install ffmpeg first. See / endpoint for instructions."
-        )
     
     try:
         video = client.get_video(url)
         
-        if not hasattr(video, 'm3u8_base_url'):
-            raise HTTPException(status_code=404, detail="No video stream found")
+        print(f"[DEBUG] Got video: {video.title}")
         
-        # Get M3U8 URL
-        base_url = video.m3u8_base_url
-        m3u8_url = get_best_quality_m3u8(base_url)
-        
-        print(f"[DEBUG] Downloading from: {m3u8_url}")
-        
-        # Create temp file
+        # Create temp directory
         temp_dir = tempfile.mkdtemp()
         filename = sanitize_filename(video.title)
-        output_path = os.path.join(temp_dir, filename)
         
-        print(f"[DEBUG] Saving to: {output_path}")
+        print(f"[DEBUG] Downloading to: {temp_dir}")
         
-        # Download using ffmpeg
-        ffmpeg_cmd = get_ffmpeg_command()
-        print(f"[DEBUG] Using ffmpeg: {ffmpeg_cmd}")
-        
+        # Use library's download method (handles tokens automatically)
         try:
-            subprocess.run([
-                ffmpeg_cmd,
-                '-i', m3u8_url,
-                '-c', 'copy',  # Copy without re-encoding (faster)
-                '-bsf:a', 'aac_adtstoasc',  # Fix audio
-                output_path
-            ], check=True, capture_output=True, timeout=300)  # 5 min timeout
+            video.download(
+                downloader="threaded",
+                quality=quality,
+                path=temp_dir
+            )
+            print(f"[DEBUG] Download completed")
             
-            print(f"[DEBUG] Download complete")
-            
-        except subprocess.TimeoutExpired:
+        except Exception as e:
             shutil.rmtree(temp_dir)
-            raise HTTPException(status_code=504, detail="Download timeout (>5 minutes)")
-        except subprocess.CalledProcessError as e:
+            print(f"[ERROR] Library download failed: {e}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Download failed. The video may be private, geo-blocked, or require authentication. Error: {str(e)}"
+            )
+        
+        # Find the downloaded file
+        downloaded_files = []
+        for file in os.listdir(temp_dir):
+            if file.endswith(('.mp4', '.mkv', '.webm')):
+                downloaded_files.append(file)
+        
+        if not downloaded_files:
             shutil.rmtree(temp_dir)
-            raise HTTPException(status_code=500, detail=f"ffmpeg error: {e.stderr.decode()}")
+            raise HTTPException(
+                status_code=500,
+                detail="Download completed but no video file found. The video format may not be supported."
+            )
+        
+        file_path = os.path.join(temp_dir, downloaded_files[0])
+        file_size = os.path.getsize(file_path)
+        
+        print(f"[DEBUG] Found file: {downloaded_files[0]} ({file_size / (1024*1024):.2f} MB)")
+        
+        # Check if file is too small (likely failed)
+        if file_size < 1024 * 100:  # Less than 100KB
+            shutil.rmtree(temp_dir)
+            raise HTTPException(
+                status_code=500,
+                detail="Downloaded file is too small. Download may have failed."
+            )
         
         # Stream file back to user
         def iterfile():
             try:
-                with open(output_path, 'rb') as f:
-                    while chunk := f.read(1024*1024):  # 1MB chunks
+                with open(file_path, 'rb') as f:
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
                         yield chunk
             finally:
-                # Cleanup
+                # Cleanup temp directory
                 try:
                     shutil.rmtree(temp_dir)
-                except:
-                    pass
+                    print(f"[DEBUG] Cleaned up temp directory")
+                except Exception as e:
+                    print(f"[ERROR] Cleanup failed: {e}")
         
         return StreamingResponse(
             iterfile(),
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(file_size)
             }
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+        print(f"[ERROR] Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @app.get("/download-simple")
 def download_simple(url: str = Query(..., description="xHamster video URL")):
