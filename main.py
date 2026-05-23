@@ -43,19 +43,14 @@ def sanitize_filename(name: str) -> str:
 
 def progress_hook(d, download_id):
     if d['status'] == 'downloading':
-
         downloaded = d.get('downloaded_bytes', 0)
         total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-
         percent = (downloaded / total * 100) if total else 0
-
         download_progress[download_id] = {
             "status": "downloading",
             "percent": round(percent, 1)
         }
-
     elif d['status'] == 'finished':
-
         download_progress[download_id] = {
             "status": "processing",
             "percent": 100
@@ -63,31 +58,42 @@ def progress_hook(d, download_id):
 
 
 def get_ydl_opts(temp_dir=None, download=False, download_id=None):
+    """
+    Build yt-dlp options with curl_cffi-based Chrome impersonation.
+
+    Key fixes vs the original:
+    - `impersonate` is a TOP-LEVEL option (not inside extractor_args).
+      yt-dlp uses this to route ALL HTTP requests through curl_cffi,
+      which bypasses Cloudflare and similar bot-detection systems.
+    - `extractor_args` impersonation only affects the generic extractor's
+      URL sniffing logic, NOT the actual HTTP layer — that's why it didn't help.
+    - We still set http_headers for sites that check User-Agent before
+      serving the page, but curl_cffi handles the TLS fingerprint / JA3
+      spoofing that Cloudflare actually checks.
+    - `prefer_insecure` + `nocheckcertificate` as fallback for self-signed CDN certs.
+    """
 
     opts = {
         "quiet": True,
         "no_warnings": True,
 
-        # CLOUDLFARE FIX
-        "extractor_args": {
-            "generic": {
-                "impersonate": ["chrome"]
-            }
-        },
+        # ── CORE FIX ──────────────────────────────────────────────────────────
+        # Tell yt-dlp to use curl_cffi with Chrome's TLS fingerprint for
+        # every request.  This is what actually defeats Cloudflare / 403s.
+        # Requires:  pip install curl-cffi
+        "impersonate": "chrome",          # top-level, not inside extractor_args
+        # ─────────────────────────────────────────────────────────────────────
 
-        # BETTER HEADERS
+        # Fallback headers for sites that also check the UA string
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
 
-        # EXTRA FIXES
         "geo_bypass": True,
         "retries": 10,
         "fragment_retries": 10,
@@ -96,7 +102,6 @@ def get_ydl_opts(temp_dir=None, download=False, download_id=None):
     }
 
     if download:
-
         opts.update({
             "format": "best",
             "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
@@ -114,32 +119,20 @@ def get_ydl_opts(temp_dir=None, download=False, download_id=None):
 
 @app.get("/")
 def root():
-    return {
-        "message": "Video Downloader API Running 🚀"
-    }
+    return {"message": "Video Downloader API Running 🚀"}
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "ok"
-    }
+    return {"status": "ok"}
 
 
 @app.get("/info")
 def get_info(url: str = Query(...)):
-
     try:
-
         ydl_opts = get_ydl_opts()
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=False
-            )
-
+            info = ydl.extract_info(url, download=False)
             return {
                 "title": info.get("title"),
                 "thumbnail": info.get("thumbnail"),
@@ -147,9 +140,7 @@ def get_info(url: str = Query(...)):
                 "uploader": info.get("uploader"),
                 "view_count": info.get("view_count"),
             }
-
     except Exception as e:
-
         raise HTTPException(
             status_code=400,
             detail=f"Failed to fetch video info: {str(e)}"
@@ -158,13 +149,9 @@ def get_info(url: str = Query(...)):
 
 @app.get("/progress/{download_id}")
 def progress(download_id: str):
-
     return download_progress.get(
         download_id,
-        {
-            "status": "unknown",
-            "percent": 0
-        }
+        {"status": "unknown", "percent": 0}
     )
 
 
@@ -173,18 +160,13 @@ def download_video(
     url: str = Query(...),
     download_id: str = Query(None)
 ):
-
     if not download_id:
         download_id = str(uuid.uuid4())
 
     temp_dir = tempfile.mkdtemp()
 
     try:
-
-        download_progress[download_id] = {
-            "status": "starting",
-            "percent": 0
-        }
+        download_progress[download_id] = {"status": "starting", "percent": 0}
 
         ydl_opts = get_ydl_opts(
             temp_dir=temp_dir,
@@ -193,81 +175,48 @@ def download_video(
         )
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True
-            )
-
+            info = ydl.extract_info(url, download=True)
             title = info.get("title", "video")
 
-        # FIND FILE
-        downloaded_files = []
-
-        for file in os.listdir(temp_dir):
-
-            if file.endswith((
-                ".mp4",
-                ".mkv",
-                ".webm",
-                ".avi",
-                ".flv"
-            )):
-                downloaded_files.append(file)
+        # Find the downloaded file
+        downloaded_files = [
+            f for f in os.listdir(temp_dir)
+            if f.endswith((".mp4", ".mkv", ".webm", ".avi", ".flv"))
+        ]
 
         if not downloaded_files:
+            raise HTTPException(status_code=500, detail="No downloaded file found")
 
-            raise HTTPException(
-                status_code=500,
-                detail="No downloaded file found"
-            )
-
-        file_path = os.path.join(
-            temp_dir,
-            downloaded_files[0]
-        )
-
+        file_path = os.path.join(temp_dir, downloaded_files[0])
         file_size = os.path.getsize(file_path)
-
         filename = sanitize_filename(title)
 
         def iterfile():
-
             try:
-
                 with open(file_path, "rb") as f:
-
                     while chunk := f.read(1024 * 1024):
                         yield chunk
-
             finally:
-
                 try:
                     shutil.rmtree(temp_dir)
-                except:
+                except Exception:
                     pass
 
         return StreamingResponse(
             iterfile(),
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition":
-                    f'attachment; filename="{filename}"',
-                "Content-Length": str(file_size)
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(file_size),
             }
         )
 
     except Exception as e:
-
         try:
             shutil.rmtree(temp_dir)
-        except:
+        except Exception:
             pass
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =========================
@@ -275,11 +224,5 @@ def download_video(
 # =========================
 
 if __name__ == "__main__":
-
     import uvicorn
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
