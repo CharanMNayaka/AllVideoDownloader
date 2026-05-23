@@ -12,6 +12,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
+      pip install -U yt-dlp curl-cffi && pip install -r requirements.txt
 
     preDeployCommand: |
       apt-get update
