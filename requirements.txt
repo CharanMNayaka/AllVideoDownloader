@@ -1,4 +1,8 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-yt-dlp==2024.12.23
-requests==2.31.0
+fastapi
+uvicorn[standard]
+yt-dlp
+curl-cffi
+brotli
+certifi
+python-multipart
+requests
