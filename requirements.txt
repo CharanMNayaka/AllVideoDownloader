@@ -1,8 +1,8 @@
-fastapi
-uvicorn[standard]
-yt-dlp
-curl-cffi
-brotli
-certifi
-python-multipart
-requests
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+yt-dlp==2025.1.15
+curl-cffi==0.7.4
+brotli==1.1.0
+certifi==2024.12.14
+python-multipart==0.0.20
+requests==2.32.3
